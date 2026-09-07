@@ -129,3 +129,71 @@ def test_suscribir_stripe_test_mode(client):
     r = client.post("/api/suscribir")
     assert r.status_code in (200, 400)
     assert r.is_json
+
+
+def test_cita_tiene_token_publico_no_adivinable(client):
+    fecha = (datetime.now(timezone.utc) + timedelta(hours=5)).isoformat()
+    cita = client.post("/api/citas", json={
+        "nombre_paciente": "Token Test", "telefono": "+34600111222", "fecha_hora": fecha,
+    }).get_json()
+    with backend_app.app.app_context():
+        c = backend_app.db.session.get(backend_app.Cita, cita["id"])
+        assert c.token_publico is not None
+        assert len(c.token_publico) >= 32
+
+
+def test_endpoint_publico_por_token_no_expone_id_secuencial_adivinable(client):
+    """Regresión de seguridad (IDOR encontrado en pentest): el endpoint público
+    al que llega el paciente por WhatsApp debe usar un token no adivinable,
+    no el id numérico secuencial de la cita."""
+    fecha = (datetime.now(timezone.utc) + timedelta(hours=5)).isoformat()
+    cita = client.post("/api/citas", json={
+        "nombre_paciente": "Paciente Privado", "telefono": "+34600222333", "fecha_hora": fecha,
+    }).get_json()
+    with backend_app.app.app_context():
+        c = backend_app.db.session.get(backend_app.Cita, cita["id"])
+        token = c.token_publico
+
+    # confirmar via id secuencial NO debe ser el camino público (solo admin)
+    r_publico = client.post(f"/c/{token}/confirmar")
+    assert r_publico.status_code == 200
+    body = r_publico.get_json()
+    # el endpoint público no debe filtrar teléfono/nombre del paciente
+    assert "telefono" not in body
+    assert "nombre_paciente" not in body
+
+    # un token inventado (no existente) no debe encontrar ninguna cita
+    r_falso = client.post("/c/token-inventado-que-no-existe/confirmar")
+    assert r_falso.status_code == 404
+
+
+def test_cancelar_cita_ajena_via_token_incorrecto_no_afecta_otra_cita(client):
+    fecha = (datetime.now(timezone.utc) + timedelta(hours=5)).isoformat()
+    cita_a = client.post("/api/citas", json={
+        "nombre_paciente": "Paciente A", "telefono": "+34600333444", "fecha_hora": fecha,
+    }).get_json()
+    cita_b = client.post("/api/citas", json={
+        "nombre_paciente": "Paciente B", "telefono": "+34600444555", "fecha_hora": fecha,
+    }).get_json()
+    with backend_app.app.app_context():
+        token_b = backend_app.db.session.get(backend_app.Cita, cita_b["id"]).token_publico
+
+    client.post(f"/c/{token_b}/cancelar")
+
+    with backend_app.app.app_context():
+        a = backend_app.db.session.get(backend_app.Cita, cita_a["id"])
+        b = backend_app.db.session.get(backend_app.Cita, cita_b["id"])
+        assert a.estado == "pendiente"
+        assert b.estado == "cancelada"
+
+
+def test_admin_token_protege_endpoints_administrativos_cuando_configurado(client, monkeypatch):
+    """Regresión de seguridad: si se configura ADMIN_TOKEN, los endpoints de
+    listado/gestión masiva de citas (datos de pacientes) deben exigirlo."""
+    monkeypatch.setattr(backend_app, "ADMIN_TOKEN", "super-secreto-test")
+    r_sin_token = client.get("/api/citas")
+    assert r_sin_token.status_code == 401
+    r_con_token_malo = client.get("/api/citas", headers={"X-Admin-Token": "incorrecto"})
+    assert r_con_token_malo.status_code == 401
+    r_con_token_bueno = client.get("/api/citas", headers={"X-Admin-Token": "super-secreto-test"})
+    assert r_con_token_bueno.status_code == 200

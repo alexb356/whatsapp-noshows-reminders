@@ -32,3 +32,15 @@ MVP Flask + SQLite:
 
 ## Revisión de bugs post-entrega (07/09/2026)
 Se hizo una pasada de QA sobre el código antes de publicarlo: pyflakes (sin avisos tras limpiar un import no usado), y pruebas de casos límite (cancelar cita antes de enviar recordatorio, doble sincronización sin duplicar citas, fechas naive vs con timezone). No se encontraron bugs funcionales adicionales. Se corrigió una vulnerabilidad de **HTML injection**: el nombre del paciente (que puede venir del título de un evento de Google Calendar, dato externo) se insertaba sin escapar en el panel de citas vía `innerHTML` — corregido con `escapeHtml()`.
+
+## Auditoría de pentest (07/09/2026) — hallazgos y correcciones
+
+| # | Hallazgo | Severidad | Corrección |
+|---|----------|-----------|------------|
+| 1 | **IDOR (Insecure Direct Object Reference) crítico**: el enlace enviado al paciente por WhatsApp era `/confirmar/<id_entero_secuencial>`. Cualquiera podía iterar IDs consecutivos y confirmar o **cancelar las citas de otros pacientes** — ataque de disponibilidad directo contra el negocio del profesional (podía vaciar la agenda cancelando todas las citas). | 🔴 Crítica | Cada cita recibe un `token_publico` no adivinable (`secrets.token_urlsafe(32)`, columna `UNIQUE`). El enlace público ahora es `/c/<token>/confirmar` y `/c/<token>/cancelar`; el `id` numérico interno ya no se expone en el mensaje de WhatsApp. La respuesta del endpoint público tampoco filtra teléfono ni nombre del paciente (`to_dict(incluir_datos_sensibles=False)`). |
+| 2 | **Exposición sin autenticación de datos de pacientes**: `GET /api/citas` devolvía nombre, teléfono y hora de cita de **todos los pacientes** sin ningún control de acceso — dato especialmente sensible tratándose de pacientes de psicólogos/terapeutas. | 🔴 Crítica | Endpoints de administración (`/api/citas`, `/sincronizar`, `/enviar_recordatorios`, confirmar/cancelar por id interno) protegidos por un token compartido opcional `ADMIN_TOKEN` (cabecera `X-Admin-Token`, comparación con `secrets.compare_digest` para evitar timing attacks). Si no se configura (modo demo/local), quedan abiertos — **debe configurarse obligatoriamente en cualquier despliegue accesible desde internet**, documentado en `.env.example`. |
+| 3 | **DoS / debug expuesto** (mismo patrón transversal). | 🟡 Media | `debug` controlado por `FLASK_DEBUG`; `MAX_CONTENT_LENGTH` 2MB; cabeceras de seguridad estándar. |
+
+4 tests nuevos de regresión (token no adivinable, endpoint público no filtra datos sensibles, cancelar la cita de un token no afecta a otra cita, `ADMIN_TOKEN` bloquea/permite correctamente). Total: 16/16 tests pasan.
+
+**Limitación no resuelta (documentada)**: `ADMIN_TOKEN` es un secreto compartido simple, no un sistema de login con usuarios — suficiente para un único profesional autónomo, pero no aísla a varios profesionales entre sí si se despliega multi-tenant sin más desarrollo.

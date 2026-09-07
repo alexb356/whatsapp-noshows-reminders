@@ -10,6 +10,7 @@ Arquitectura pensada para funcionar con 0€ de gasto real:
 Ver NORMATIVA.md para las políticas de Meta/WhatsApp y RGPD relevantes.
 """
 import os
+import secrets
 from datetime import datetime, timedelta, timezone
 from abc import ABC, abstractmethod
 
@@ -23,10 +24,38 @@ app = Flask(__name__)
 app.config["SECRET_KEY"] = os.environ.get("FLASK_SECRET_KEY", "dev-only-not-secure")
 app.config["SQLALCHEMY_DATABASE_URI"] = os.environ.get("DATABASE_URL", "sqlite:///reminders.db")
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024  # 2MB: mitiga DoS por payload gigante
 
 db = SQLAlchemy(app)
 
+
+@app.after_request
+def _cabeceras_seguridad(resp):
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["X-Frame-Options"] = "DENY"
+    resp.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    return resp
+
 HORAS_ANTES_RECORDATORIO = float(os.environ.get("HORAS_ANTES_RECORDATORIO", "24"))
+ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "").strip()
+
+
+def requiere_admin(func):
+    """Protege los endpoints del panel de administración (listado completo de
+    pacientes, sincronización, envío masivo, confirmar/cancelar por id interno)
+    con un token compartido si ADMIN_TOKEN está configurado. Si no se configura
+    (modo demo/local), el endpoint queda abierto — recomendado configurarlo
+    siempre en cualquier despliegue accesible desde internet."""
+    from functools import wraps
+
+    @wraps(func)
+    def envoltura(*args, **kwargs):
+        if ADMIN_TOKEN:
+            recibido = request.headers.get("X-Admin-Token", "")
+            if not secrets.compare_digest(recibido, ADMIN_TOKEN):
+                return jsonify({"error": "no autorizado"}), 401
+        return func(*args, **kwargs)
+    return envoltura
 
 
 # ---------------------------------------------------------------------------
@@ -41,14 +70,14 @@ class WhatsAppClient(ABC):
 
 class WhatsAppClientMock(WhatsAppClient):
     """Cliente simulado: no requiere credenciales, registra en memoria/BD lo que se enviaría."""
-    def enviar_recordatorio(self, telefono, nombre_paciente, fecha_hora_str, cita_id):
+    def enviar_recordatorio(self, telefono, nombre_paciente, fecha_hora_str, token_publico):
         return {
             "modo": "mock",
             "estado": "simulado_ok",
             "telefono": telefono,
             "mensaje": (
                 f"Hola {nombre_paciente}, te recordamos tu cita el {fecha_hora_str}. "
-                f"Responde CONFIRMAR o CANCELAR, o entra aquí: /confirmar/{cita_id}"
+                f"Responde CONFIRMAR o CANCELAR, o entra aquí: /c/{token_publico}"
             ),
         }
 
@@ -63,7 +92,7 @@ class WhatsAppClientReal(WhatsAppClient):
         self.template_name = os.environ.get("WHATSAPP_TEMPLATE_NAME", "recordatorio_cita")
         self.api_version = os.environ.get("WHATSAPP_API_VERSION", "v20.0")
 
-    def enviar_recordatorio(self, telefono, nombre_paciente, fecha_hora_str, cita_id):
+    def enviar_recordatorio(self, telefono, nombre_paciente, fecha_hora_str, token_publico):
         url = f"https://graph.facebook.com/{self.api_version}/{self.phone_number_id}/messages"
         payload = {
             "messaging_product": "whatsapp",
@@ -169,6 +198,8 @@ def get_calendar_client():
 
 class Cita(db.Model):
     id = db.Column(db.Integer, primary_key=True)
+    token_publico = db.Column(db.String(43), unique=True, nullable=False,
+                               default=lambda: secrets.token_urlsafe(32))
     evento_calendar_id = db.Column(db.String(200))
     nombre_paciente = db.Column(db.String(200), nullable=False)
     telefono = db.Column(db.String(30), nullable=False)
@@ -177,13 +208,18 @@ class Cita(db.Model):
     recordatorio_enviado = db.Column(db.Boolean, default=False)
     creado = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
-    def to_dict(self):
-        return {
-            "id": self.id, "evento_calendar_id": self.evento_calendar_id,
-            "nombre_paciente": self.nombre_paciente, "telefono": self.telefono,
+    def to_dict(self, incluir_datos_sensibles=True):
+        base = {
+            "id": self.id,
             "fecha_hora": self.fecha_hora.strftime("%d-%m-%Y %H:%M"),
             "estado": self.estado, "recordatorio_enviado": self.recordatorio_enviado,
         }
+        if incluir_datos_sensibles:
+            base.update({
+                "evento_calendar_id": self.evento_calendar_id,
+                "nombre_paciente": self.nombre_paciente, "telefono": self.telefono,
+            })
+        return base
 
 
 def validar_telefono(telefono):
@@ -197,6 +233,7 @@ def index():
 
 
 @app.route("/api/citas", methods=["GET", "POST"])
+@requiere_admin
 def citas():
     if request.method == "POST":
         data = request.get_json(force=True, silent=True) or {}
@@ -219,6 +256,7 @@ def citas():
 
 
 @app.route("/api/citas/sincronizar", methods=["POST"])
+@requiere_admin
 def sincronizar_calendario():
     """Importa próximos eventos desde Google Calendar (o el mock) como citas."""
     cliente = get_calendar_client()
@@ -246,6 +284,7 @@ def sincronizar_calendario():
 
 
 @app.route("/api/citas/enviar_recordatorios", methods=["POST"])
+@requiere_admin
 def enviar_recordatorios():
     """Envía el recordatorio a todas las citas dentro de la ventana configurada que aún no lo recibieron."""
     ahora = datetime.now(timezone.utc)
@@ -263,7 +302,7 @@ def enviar_recordatorios():
         if ahora <= fecha_hora <= ventana_fin:
             resultado = cliente_wa.enviar_recordatorio(
                 cita.telefono, cita.nombre_paciente,
-                cita.fecha_hora.strftime("%d-%m-%Y %H:%M"), cita.id,
+                cita.fecha_hora.strftime("%d-%m-%Y %H:%M"), cita.token_publico,
             )
             cita.recordatorio_enviado = True
             enviados.append({"cita_id": cita.id, "resultado": resultado})
@@ -272,7 +311,10 @@ def enviar_recordatorios():
 
 
 @app.route("/api/citas/<int:cita_id>/confirmar", methods=["POST"])
+@requiere_admin
 def confirmar_cita(cita_id):
+    """Uso interno del panel de administración del profesional (requiere IDOR
+    consciente: en producción este panel debería estar detrás de login)."""
     cita = Cita.query.get_or_404(cita_id)
     cita.estado = "confirmada"
     db.session.commit()
@@ -280,11 +322,48 @@ def confirmar_cita(cita_id):
 
 
 @app.route("/api/citas/<int:cita_id>/cancelar", methods=["POST"])
+@requiere_admin
 def cancelar_cita(cita_id):
+    """Uso interno del panel de administración del profesional (requiere IDOR
+    consciente: en producción este panel debería estar detrás de login)."""
     cita = Cita.query.get_or_404(cita_id)
     cita.estado = "cancelada"
     db.session.commit()
     return jsonify(cita.to_dict())
+
+
+@app.route("/c/<token>", methods=["GET"])
+def ver_cita_publica(token):
+    """Endpoint público (sin autenticación) al que llega el paciente desde el
+    enlace de WhatsApp. Usa un token no adivinable (secrets.token_urlsafe) en
+    vez del id numérico secuencial, para que no se puedan enumerar/manipular
+    citas de otros pacientes (mitigación del IDOR encontrado en pentest)."""
+    cita = Cita.query.filter_by(token_publico=token).first()
+    if not cita:
+        return jsonify({"error": "cita no encontrada"}), 404
+    return jsonify(cita.to_dict(incluir_datos_sensibles=False))
+
+
+@app.route("/c/<token>/confirmar", methods=["POST"])
+def confirmar_cita_publica(token):
+    cita = Cita.query.filter_by(token_publico=token).first()
+    if not cita:
+        return jsonify({"error": "cita no encontrada"}), 404
+    if cita.estado == "cancelada":
+        return jsonify({"error": "esta cita ya fue cancelada, contacta con el profesional"}), 409
+    cita.estado = "confirmada"
+    db.session.commit()
+    return jsonify(cita.to_dict(incluir_datos_sensibles=False))
+
+
+@app.route("/c/<token>/cancelar", methods=["POST"])
+def cancelar_cita_publica(token):
+    cita = Cita.query.filter_by(token_publico=token).first()
+    if not cita:
+        return jsonify({"error": "cita no encontrada"}), 404
+    cita.estado = "cancelada"
+    db.session.commit()
+    return jsonify(cita.to_dict(incluir_datos_sensibles=False))
 
 
 @app.route("/api/suscribir", methods=["POST"])
@@ -308,4 +387,4 @@ def crear_tablas():
 
 if __name__ == "__main__":
     crear_tablas()
-    app.run(debug=True, port=5004)
+    app.run(debug=os.environ.get("FLASK_DEBUG", "0") == "1", port=5004)
