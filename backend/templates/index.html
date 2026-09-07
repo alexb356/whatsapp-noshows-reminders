@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>Recordatorios WhatsApp contra no-shows</title>
+<style>
+  body { font-family: sans-serif; max-width: 900px; margin: 30px auto; padding: 0 20px; color: #222; }
+  h1 { color: #1a4d8f; }
+  fieldset { margin-bottom: 25px; padding: 15px; border-radius: 8px; border: 1px solid #ccc; }
+  label { display: block; margin-top: 8px; font-size: 0.9em; }
+  input { width: 100%; padding: 6px; box-sizing: border-box; }
+  button { margin-top: 12px; padding: 8px 16px; background: #1a4d8f; color: white; border: none; border-radius: 5px; cursor: pointer; }
+  table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 0.85em; }
+  td, th { border: 1px solid #ddd; padding: 6px; }
+</style>
+</head>
+<body>
+<h1>Recordatorios automáticos por WhatsApp</h1>
+<p>Para fisios, psicólogos y terapeutas que trabajan solos. Conecta tu Google Calendar y evita no-shows.</p>
+
+<fieldset>
+  <legend>1. Sincronizar con Google Calendar</legend>
+  <p>En modo demo (sin credenciales reales configuradas) se usa un calendario simulado.</p>
+  <button onclick="sincronizar()">Sincronizar próximos eventos</button>
+  <div id="sync_msg"></div>
+</fieldset>
+
+<fieldset>
+  <legend>2. Alta manual de cita</legend>
+  <label>Nombre paciente <input id="c_nombre"></label>
+  <label>Teléfono (formato internacional) <input id="c_telefono" placeholder="+34600000000"></label>
+  <label>Fecha y hora <input id="c_fecha" type="datetime-local"></label>
+  <button onclick="crearCita()">Crear cita</button>
+  <div id="cita_msg"></div>
+</fieldset>
+
+<fieldset>
+  <legend>3. Enviar recordatorios pendientes</legend>
+  <button onclick="enviarRecordatorios()">Enviar recordatorios (ventana configurada)</button>
+  <div id="recordatorio_msg"></div>
+</fieldset>
+
+<fieldset>
+  <legend>4. Citas</legend>
+  <table id="tabla"><thead><tr><th>Paciente</th><th>Teléfono</th><th>Fecha</th><th>Estado</th><th>Recordatorio</th><th>Acciones</th></tr></thead><tbody></tbody></table>
+</fieldset>
+
+<script>
+async function sincronizar() {
+  const r = await fetch('/api/citas/sincronizar', {method:'POST'});
+  const data = await r.json();
+  document.getElementById('sync_msg').textContent = `Importadas: ${data.citas_importadas}`;
+  cargarCitas();
+}
+
+async function crearCita() {
+  const body = {
+    nombre_paciente: document.getElementById('c_nombre').value,
+    telefono: document.getElementById('c_telefono').value,
+    fecha_hora: document.getElementById('c_fecha').value,
+  };
+  const r = await fetch('/api/citas', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+  const data = await r.json();
+  document.getElementById('cita_msg').textContent = r.ok ? 'Cita creada' : data.error;
+  if (r.ok) cargarCitas();
+}
+
+async function enviarRecordatorios() {
+  const r = await fetch('/api/citas/enviar_recordatorios', {method:'POST'});
+  const data = await r.json();
+  document.getElementById('recordatorio_msg').textContent = `Enviados: ${data.recordatorios_enviados}`;
+  cargarCitas();
+}
+
+async function confirmar(id) { await fetch(`/api/citas/${id}/confirmar`, {method:'POST'}); cargarCitas(); }
+async function cancelar(id) { await fetch(`/api/citas/${id}/cancelar`, {method:'POST'}); cargarCitas(); }
+
+async function cargarCitas() {
+  const r = await fetch('/api/citas');
+  const data = await r.json();
+  document.querySelector('#tabla tbody').innerHTML = data.map(c => `<tr>
+    <td>${c.nombre_paciente}</td><td>${c.telefono}</td><td>${c.fecha_hora}</td>
+    <td>${c.estado}</td><td>${c.recordatorio_enviado ? 'Sí' : 'No'}</td>
+    <td><button onclick="confirmar(${c.id})">Confirmar</button> <button onclick="cancelar(${c.id})">Cancelar</button></td>
+  </tr>`).join('');
+}
+
+cargarCitas();
+</script>
+</body>
+</html>
