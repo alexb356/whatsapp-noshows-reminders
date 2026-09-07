@@ -28,7 +28,7 @@
 <fieldset>
   <legend>2. Alta manual de cita</legend>
   <label>Nombre paciente <input id="c_nombre"></label>
-  <label>Teléfono (formato internacional) <input id="c_telefono" placeholder="+34600000000"></label>
+  <label>Teléfono (formato internacional) <input id="c_telefono" placeholder="+34NNNNNNNNN"></label>
   <label>Fecha y hora <input id="c_fecha" type="datetime-local"></label>
   <button onclick="crearCita()">Crear cita</button>
   <div id="cita_msg"></div>
@@ -46,6 +46,12 @@
 </fieldset>
 
 <script>
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = (str === null || str === undefined) ? '' : String(str);
+  return div.innerHTML;
+}
+
 async function sincronizar() {
   const r = await fetch('/api/citas/sincronizar', {method:'POST'});
   const data = await r.json();
@@ -79,8 +85,8 @@ async function cargarCitas() {
   const r = await fetch('/api/citas');
   const data = await r.json();
   document.querySelector('#tabla tbody').innerHTML = data.map(c => `<tr>
-    <td>${c.nombre_paciente}</td><td>${c.telefono}</td><td>${c.fecha_hora}</td>
-    <td>${c.estado}</td><td>${c.recordatorio_enviado ? 'Sí' : 'No'}</td>
+    <td>${escapeHtml(c.nombre_paciente)}</td><td>${escapeHtml(c.telefono)}</td><td>${escapeHtml(c.fecha_hora)}</td>
+    <td>${escapeHtml(c.estado)}</td><td>${c.recordatorio_enviado ? 'Sí' : 'No'}</td>
     <td><button onclick="confirmar(${c.id})">Confirmar</button> <button onclick="cancelar(${c.id})">Cancelar</button></td>
   </tr>`).join('');
 }

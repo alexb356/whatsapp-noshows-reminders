@@ -10,7 +10,6 @@ Arquitectura pensada para funcionar con 0€ de gasto real:
 Ver NORMATIVA.md para las políticas de Meta/WhatsApp y RGPD relevantes.
 """
 import os
-import json
 from datetime import datetime, timedelta, timezone
 from abc import ABC, abstractmethod
 
@@ -207,7 +206,7 @@ def citas():
         if not nombre or not telefono or not fecha_hora_str:
             return jsonify({"error": "nombre_paciente, telefono y fecha_hora son obligatorios"}), 400
         if not validar_telefono(telefono):
-            return jsonify({"error": "teléfono inválido (usa formato internacional, ej. +34600000000)"}), 400
+            return jsonify({"error": "teléfono inválido (usa formato internacional, ej. +34NNNNNNNNN)"}), 400
         try:
             fecha_hora = datetime.fromisoformat(fecha_hora_str)
         except ValueError:
